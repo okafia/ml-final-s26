@@ -1,34 +1,33 @@
 # Drum and bass auto-DJ
 _Python3 version._
 
-This repository contains a Python3 adaptation of the automatic DJ system developed by Len Vande Veire, under the supervision of prof. Tijl De Bie. It has been designed for Drum and Bass music specifically.
+This repository contains an adaptation of the automatic DJ system developed by Len Vande Veire, under the supervision of prof. Tijl De Bie. It has been updated to implement K nearest neighbors and K means clustering for adaptive track selection.
 
-The system is described in more detail in the paper [_Vande Veire, Len, and De Bie, Tijl, "From raw audio to a seamless mix: creating an automated DJ system for Drum and Bass." Journal Of Audio, Speech and Music Processing 2018, 13 (2018)_](https://doi.org/10.1186/s13636-018-0134-8).
-
-The original Python2 implementation referenced in the paper can be found [here](https://bitbucket.org/ghentdatascience/dj/src/master/).
+The system is described in more detail in the paper (link)
 
 ## Installation
 
-The auto-DJ system has been tested for Ubuntu 16.04 LTS.  
-It is recommended to install the auto-DJ using pip in a conda environment:
+The auto-DJ system has been tested for Ubuntu 18.04 LTS. Use the provided Dockerfile to build and run the system in a container environment.
 
 ```
-conda create -n "autodj" python=3.6.0
-source activate autodj
-pip install git+https://github.com/lenvdv/dnb-autodj-3
+# build docker container
+docker build -t ref-env .
+
+# run the container
+docker run -it --mount type=bind,src=$PWD,dst=/mnt ref-env
+
+# inside the container, install dependencies and build project
+cd /mnt
+pip3 install .
+# a build folder will be generated
+
 ```
 
-In case the installation fails when installing pyaudio, perform the following commands and retry the installation:
-
-```
-sudo apt-get install libasound-dev portaudio19-dev libportaudio2 libportaudiocpp0
-sudo apt-get install ffmpeg libav-tools
-sudo pip install pyaudio
 ```
 
 ## Running the application
 
-Run the application with the following command:
+Run the application in the build folder with the following command:
 
 `python -m autodj.main`
 
@@ -76,6 +75,5 @@ The main changes in the code base are:
 
 
 ## Copyright information
-Copyright 2020 Len Vande Veire.
 
 Released under AGPLv3 license.
