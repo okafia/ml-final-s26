@@ -2,6 +2,10 @@ FROM ubuntu:18.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# enable UTF-8 encoding to read special characters in track titles
+ENV LC_ALL=C.UTF-8
+ENV LANG=C.UTF-8
+
 RUN apt-get -y update && apt-get -y upgrade
 RUN apt-get -y install python3-pip python3-dev
 RUN apt-get -y install libasound-dev portaudio19-dev libportaudio2 libportaudiocpp0

@@ -23,8 +23,6 @@ pip3 install .
 
 ```
 
-```
-
 ## Running the application
 
 Run the application in the build folder with the following command:
