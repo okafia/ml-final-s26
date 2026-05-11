@@ -19,6 +19,7 @@ docker run -it --mount type=bind,src=$PWD,dst=/mnt ref-env
 # inside the container, install dependencies and build project
 cd /mnt
 pip3 install .
+pip3 install matplotlib
 # a build folder will be generated
 
 ```

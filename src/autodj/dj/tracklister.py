@@ -5,10 +5,12 @@
 from . import songcollection
 from . import songtransitions
 from .song import *
+from .gto_mixer import GTOMixer
 
 import numpy as np
 from scipy.spatial.distance import euclidean as euclidean_distance
 import random
+import csv
 
 import logging
 logger = logging.getLogger('colorlogger')
@@ -284,23 +286,76 @@ class TrackLister:
 		
 		self.theme_centroid = None
 		self.prev_song_theme_descriptor = None
-		
+
+		self.gto_mixer = None
+		self.recently_played_history = []  # persists across pool replenishments
+		self.GTO_RECENT_WINDOW = 3         # how many recent songs to block from re-selection
+
+		self.mix_log_path = './mix_log.csv'
+		self._mix_log_initialized = False
+		self._mix_log_step = 0
+
+		self.max_tracks = None   # None = unlimited; set before calling play
+		self._songs_played_count = 0
+
 	def getFirstSong(self):
-			
-		# Do some initialization and return the first song to be played
-		self.songsUnplayed = self.song_collection.get_annotated()	# Subset of song collection containing all unplayed songs
-		firstSong = np.random.choice(self.songsUnplayed, size=1)[0]
-		#~ firstSong = [s for s in self.songsUnplayed if 'Crude Tactics' in s.title][0]
+
+		self.songsUnplayed = self.song_collection.get_annotated()
+
+		# Fit the GTO mixer on the full library so features and clusters are
+		# cached before any song selection or energy-arc planning takes place.
+		self.gto_mixer = GTOMixer(n_clusters=3, n_neighbors=5)
+		self.gto_mixer.fit(self.songsUnplayed)
+
+		# Select the lowest-energy track (cluster 0) as the opening song so the
+		# mix can follow a coherent ascending energy arc, as described by
+		# Flexer et al.'s energy-arc framework.
+		low_energy_songs = [s for s in self.songsUnplayed
+		                    if self.gto_mixer.get_cluster(s) == 0]
+		if low_energy_songs:
+			firstSong = low_energy_songs[0]
+		else:
+			firstSong = np.random.choice(self.songsUnplayed, size=1)[0]
+
 		self.songsUnplayed.remove(firstSong)
 		self.songsPlayed.append(firstSong)
 		firstSong.open()
-		
-		# Choose a song to build up towards
+
+		# Plan the sigmoid energy arc from the opening song to the library peak.
+		total_tracks = len(self.songsPlayed) + len(self.songsUnplayed)
+		self.gto_mixer.plan_energy_arc(firstSong, total_tracks)
+
+		# Keep theme-centroid for any fallback path that still uses it.
 		self.chooseNewTheme(firstSong)
 		self.prev_song_theme_descriptor = firstSong.song_theme_descriptor
-		
+
+		self._mix_log_initialized = False
+		self._mix_log_step = 0
+		self._songs_played_count = 1   # first song counts as track 1
+		self._log_song(firstSong, 'START')
+
 		return firstSong
 		
+	def _log_song(self, song, action_name):
+		"""Append one row to the mix log CSV (writes header on first call)."""
+		if self.gto_mixer is None:
+			return
+		energy  = self.gto_mixer.song_raw_features.get(song.title, [170.0, 0.0, 0.0])[1]
+		cluster = self.gto_mixer.get_cluster(song)
+		arc     = self.gto_mixer.energy_arc
+		step    = self._mix_log_step
+		planned = float(arc[min(step, len(arc) - 1)]) if len(arc) else 0.0
+		key, scale = self.gto_mixer.song_keys.get(song.title, ('', ''))
+		mode = 'w' if not self._mix_log_initialized else 'a'
+		with open(self.mix_log_path, mode, newline='') as f:
+			w = csv.writer(f)
+			if not self._mix_log_initialized:
+				w.writerow(['step', 'title', 'energy', 'cluster', 'action', 'key', 'scale', 'planned_energy'])
+				self._mix_log_initialized = True
+			w.writerow([step, song.title, round(energy, 3), cluster, action_name,
+			            key or '', scale or '', round(planned, 3)])
+		self._mix_log_step += 1
+
 	def chooseNewTheme(self, firstSong):
 		# Initialize the theme centroid
 		# 1. Measure the distance of each song to the first song
@@ -384,118 +439,158 @@ class TrackLister:
 		
 	def getBestNextSongAndCrossfade(self, master_song, master_cue, master_fade_in_len, fade_out_len, fade_type):
 		'''
-			Choose a song that overlaps best with the given song
-			The type of transition is also given (rolling, double drop, chill).
+		Select the next song and crossfade parameters using the GTO framework.
+
+		Candidate selection (replaces the original key-filter + theme-distance
+		pipeline):
+		  1. KNN retrieves the 5 nearest tracks from the unplayed library using
+		     Euclidean distance in the standardised (tempo, energy, spectral)
+		     feature space.
+		  2. The GTO policy (Call / Hold / Raise) ranks the 5 candidates so that
+		     the one best matching the pre-planned energy arc comes first.
+
+		Transition-quality evaluation (unchanged from the original system):
+		  3. For each GTO-ranked candidate the onset-detection-function similarity
+		     between master and slave is computed to find the best queue point.
+		  4. Vocal-clash detection acts as a hard constraint; singing-safe options
+		     are always preferred over clashing ones.
 		'''
+		if self.max_tracks is not None and self._songs_played_count >= self.max_tracks:
+			raise StopIteration('Mix complete: {} songs played'.format(self._songs_played_count))
+
 		transition_length = master_fade_in_len + fade_out_len
-		
-		# 1. Select songs that are similar in key and that build up towards the goal song
-		key, scale = songcollection.get_key_transposed(master_song.key, master_song.scale, self.semitone_offset)
-		song_options = self.getSongOptionsInKey(key, scale)
-		closely_related_keys = songcollection.get_closely_related_keys(key, scale)
-		
-		# 2. Filter the songs in key based on their distance to the centroid
-		song_options = self.filterSongOptionsByThemeDistance(song_options, master_song)
-		#~ song_options = np.random.choice(song_options, size=NUM_SONGS_ONSETS)
-			
-		# 3. Filter based on vocal activity and ODF overlap
+
+		# Open master song to access onset curve and singing voice data.
 		master_song.open()
-		best_score = np.inf
+		key, scale = songcollection.get_key_transposed(
+			master_song.key, master_song.scale, self.semitone_offset)
+		closely_related_keys = songcollection.get_closely_related_keys(key, scale)
+
+		# ------------------------------------------------------------------
+		# Step 1 + 2: GTO candidate selection
+		# ------------------------------------------------------------------
+		gto_action_name = 'N/A'
+		if self.gto_mixer is not None and self.gto_mixer.fitted:
+			action = self.gto_mixer.decide_action(master_song)
+			gto_action_name = ['CALL', 'HOLD', 'RAISE'][action]
+
+			# Exclude the master song and recently played songs so the pool
+			# replenishment (which re-adds played songs) doesn't cause the
+			# system to immediately re-select a song it just played.
+			recent_titles = {s.title for s in self.recently_played_history[-self.GTO_RECENT_WINDOW:]}
+			recent_titles.add(master_song.title)
+			eligible = [s for s in self.songsUnplayed if s.title not in recent_titles]
+			if not eligible:
+				# All candidates were recently played; only exclude the master.
+				eligible = [s for s in self.songsUnplayed if s.title != master_song.title]
+
+			song_options = np.array(
+				self.gto_mixer.rank_candidates(master_song, eligible, action)
+			)
+			if len(song_options) == 0:
+				song_options = np.array(eligible[:NUM_SONGS_ONSETS])
+		else:
+			# Fallback: original key-filter + theme-distance selection.
+			song_options = self.getSongOptionsInKey(key, scale)
+			song_options = self.filterSongOptionsByThemeDistance(song_options, master_song)
+
+		# ------------------------------------------------------------------
+		# Step 3 + 4: onset similarity + vocal-clash evaluation
+		# ------------------------------------------------------------------
+		best_score       = np.inf
 		best_score_clash = np.inf
-		best_song = None
-		# logger.debug('Selected songs, evaluated by ODF similarity: ')
+		best_song        = None
+
 		for s in song_options:
-			# Open the song
 			next_song = s
 			next_song.open()
-			
-			# Determine the queue points for the current song
-			queue_slave, fade_in_len = getSlaveQueue(next_song, fade_type, min_playable_length = transition_length + 16)
-			fade_in_len = min(fade_in_len, master_fade_in_len)
+
+			queue_slave, fade_in_len = getSlaveQueue(
+				next_song, fade_type, min_playable_length=transition_length + 16)
+			fade_in_len           = min(fade_in_len, master_fade_in_len)
 			fade_in_len_correction = master_fade_in_len - fade_in_len
-			master_cue_corr = master_cue + fade_in_len_correction
-			transition_len_corr = transition_length - fade_in_len_correction
-			queue_slave = queue_slave - fade_in_len
-			
-			# Construct the cross-fade for this transition
-			if queue_slave >= 16:
-				cf = songtransitions.CrossFade(0, [queue_slave], transition_len_corr, fade_in_len, fade_type)
-			else:
-				cf = songtransitions.CrossFade(0, [queue_slave], transition_len_corr, fade_in_len, fade_type)
-				
-			# Iterate over the different options for queue_slave
+			master_cue_corr        = master_cue + fade_in_len_correction
+			transition_len_corr    = transition_length - fade_in_len_correction
+			queue_slave            = queue_slave - fade_in_len
+
+			cf = songtransitions.CrossFade(
+				0, [queue_slave], transition_len_corr, fade_in_len, fade_type)
+
 			for queue_slave_cur in cf.queue_2_options:
-				
-				# Split the overlapping portions of the onset curves in segments of 4 downbeats
-				# and calculate the similarities. The most dissimilar segment indicates the overall quality of the crossfade
-				
-				odf_segment_len = 4 # dbeats
+
+				odf_segment_len = 4
 				odf_scores = []
 				for odf_start_dbeat in range(0, transition_len_corr, odf_segment_len):
-					odf_master = master_song.getOnsetCurveFragment(master_cue_corr + odf_start_dbeat, min(master_cue_corr + odf_start_dbeat+odf_segment_len, master_cue_corr + transition_len_corr))
-					odf_slave = s.getOnsetCurveFragment(queue_slave_cur + odf_start_dbeat, min(queue_slave_cur+odf_start_dbeat+odf_segment_len, queue_slave_cur+transition_len_corr))
-					onset_similarity = calculateOnsetSimilarity(odf_master,odf_slave) / odf_segment_len
+					odf_master = master_song.getOnsetCurveFragment(
+						master_cue_corr + odf_start_dbeat,
+						min(master_cue_corr + odf_start_dbeat + odf_segment_len,
+						    master_cue_corr + transition_len_corr))
+					odf_slave = s.getOnsetCurveFragment(
+						queue_slave_cur + odf_start_dbeat,
+						min(queue_slave_cur + odf_start_dbeat + odf_segment_len,
+						    queue_slave_cur + transition_len_corr))
+					onset_similarity = calculateOnsetSimilarity(odf_master, odf_slave) / odf_segment_len
 					odf_scores.append(onset_similarity)
-				
-				singing_scores = []
-				singing_master = np.array(master_song.singing_voice[master_cue_corr : master_cue_corr + transition_len_corr] > 0)
-				singing_slave = np.array(s.singing_voice[queue_slave : queue_slave + transition_len_corr] > 0)
-				singing_clash = is_vocal_clash_pred(singing_master, singing_slave)
-				
-				onset_similarity = np.average(odf_scores)
-				score = onset_similarity
-				
+
+				singing_master = np.array(
+					master_song.singing_voice[master_cue_corr:master_cue_corr + transition_len_corr] > 0)
+				singing_slave  = np.array(
+					s.singing_voice[queue_slave:queue_slave + transition_len_corr] > 0)
+				min_len = min(len(singing_master), len(singing_slave))
+				singing_clash  = is_vocal_clash_pred(singing_master[:min_len], singing_slave[:min_len])
+
+				score = np.average(odf_scores)
+
 				if score < best_score and not singing_clash:
-					best_song = next_song
-					best_score = score
-					best_fade_in_len = fade_in_len
-					best_slave_cue = queue_slave_cur
-					best_master_cue = master_cue_corr
+					best_song         = next_song
+					best_score        = score
+					best_fade_in_len  = fade_in_len
+					best_slave_cue    = queue_slave_cur
+					best_master_cue   = master_cue_corr
 				elif best_score == np.inf and score < best_score_clash and singing_clash:
-					best_song_clash = next_song
-					best_score_clash = score
+					best_song_clash        = next_song
+					best_score_clash       = score
 					best_fade_in_len_clash = fade_in_len
-					best_slave_cue_clash = queue_slave_cur
-					best_master_cue_clash = master_cue_corr
-				
-				type_fade_dbg_str = '>> {:20s} [{}:{:3d}]: ODF {:.2f} {}'.format(
-					next_song.title[:20], 
-					fade_type, 
-					queue_slave_cur, 
-					score, 
-					'' if not singing_clash else '>>CLASH<<'
-					)
-					
-				# Logging
-				# logger.debug(type_fade_dbg_str)
-		
+					best_slave_cue_clash   = queue_slave_cur
+					best_master_cue_clash  = master_cue_corr
+
 		if best_song is None:
-			# No best song without vocal clash was found: use the clashing version instead as a last resort
-			best_song = best_song_clash
-			best_score = best_score_clash
+			# No vocal-clash-free candidate found; fall back to clashing version.
+			best_song        = best_song_clash
+			best_score       = best_score_clash
 			best_fade_in_len = best_fade_in_len_clash
-			best_slave_cue = best_slave_cue_clash
-			best_master_cue = best_master_cue_clash
-		
-		# Determine the pitch shifting factor for the next song
-		key_distance = abs(songcollection.distance_keys_semitones(key, best_song.key))
+			best_slave_cue   = best_slave_cue_clash
+			best_master_cue  = best_master_cue_clash
+
+		# ------------------------------------------------------------------
+		# Pitch shifting (unchanged)
+		# ------------------------------------------------------------------
 		if (best_song.key, best_song.scale) not in closely_related_keys:
-			# This song has been shifted one semitone up or down: this has to be compensated by means of pitch shifting
-			shifted_key_up, shifted_scale_up = songcollection.get_key_transposed(best_song.key, best_song.scale, 1)
+			shifted_key_up, shifted_scale_up = songcollection.get_key_transposed(
+				best_song.key, best_song.scale, 1)
 			if (shifted_key_up, shifted_scale_up) in closely_related_keys:
 				self.semitone_offset = 1
 			else:
 				self.semitone_offset = -1
-			logger.debug('Pitch shifting! {} {} by {} semitones'.format(best_song.key, best_song.scale, self.semitone_offset))
+			logger.debug('Pitch shifting! %s %s by %d semitones',
+			             best_song.key, best_song.scale, self.semitone_offset)
 		else:
 			self.semitone_offset = 0
-			
+
 		self.prev_song_theme_descriptor = master_song.song_theme_descriptor
+		self.recently_played_history.append(master_song)
 		self.songsPlayed.append(best_song)
 		self.songsUnplayed.remove(best_song)
-		if len(self.songsUnplayed) <= NUM_SONGS_IN_KEY_MINIMUM: # If there are too few songs remaining, then restart
+		if len(self.songsUnplayed) <= NUM_SONGS_IN_KEY_MINIMUM:
 			logger.debug('Replenishing song pool')
 			self.songsUnplayed.extend(self.songsPlayed)
-			self.songsPlayed = []	
-			
+			self.songsPlayed = []
+
+		# Advance GTO energy-arc position for the next transition.
+		if self.gto_mixer is not None:
+			self.gto_mixer.advance()
+
+		self._log_song(best_song, gto_action_name)
+		self._songs_played_count += 1
+
 		return best_song, best_slave_cue, best_master_cue, best_fade_in_len, self.semitone_offset

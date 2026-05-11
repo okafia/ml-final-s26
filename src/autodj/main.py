@@ -56,22 +56,26 @@ if __name__ == '__main__':
 			if len(cmd_split) == 1:
 				logger.warning('Please provide a directory name to load!')
 				continue
-			elif not os.path.isdir(cmd_split[1]):
-				logger.warning(cmd_split[1] + ' is not a valid directory!')
+			directory = ' '.join(cmd_split[1:])
+			if not os.path.isdir(directory):
+				logger.warning(directory + ' is not a valid directory!')
 				continue
-			sc.load_directory(cmd_split[1])
+			sc.load_directory(directory)
 			logger.info(str(len(sc.songs)) + ' songs loaded [annotated: ' + str(len(sc.get_annotated())) + ']')
 		elif cmd == 'play':
 			if len(sc.get_annotated()) == 0:
 				logger.warning('Use the loaddir command to load some songs before playing!')
 				continue
-			
-			if len(cmd_split) > 1 and cmd_split[1] == 'save':
+
+			# Syntax: play [save] [N]   e.g. "play save 8" or "play 5"
+			save_mix   = 'save' in cmd_split[1:]
+			count_args = [p for p in cmd_split[1:] if p.isdigit()]
+			tl.max_tracks = int(count_args[0]) if count_args else None
+			if tl.max_tracks is not None:
+				logger.info('Will stop after {} songs.'.format(tl.max_tracks))
+			if save_mix:
 				logger.info('Saving this new mix to disk!')
-				save_mix = True
-			else:
-				save_mix = False
-				
+
 			logger.info('Starting playback!')
 			try:
 				dj.play(save_mix=save_mix)
