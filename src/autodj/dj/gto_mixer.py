@@ -86,7 +86,7 @@ class GTOMixer:
         tempo    = song.tempo    if song.tempo    is not None else 170.0
         energy   = -song.replaygain if song.replaygain is not None else 0.0
         td       = getattr(song, 'song_theme_descriptor', None)
-        spectral = float(td[0]) if td else 0.0
+        spectral = float(np.array(td).flat[0]) if td is not None and len(td) > 0 else 0.0
         return [tempo, energy, spectral]
 
     def _scaled_for(self, song):
@@ -263,8 +263,8 @@ class GTOMixer:
             abs(raise_energy - target),  # RAISE
         ]))
 
-        logger.debug('GTO step %d: target=%.2f cur=%.2f → %s',
-                     step, target, cur_energy, self._ACTION_NAMES[action])
+        logger.debug('GTO step %d (arc pos %d): target=%.2f cur=%.2f → %s',
+                     self.mix_step, step, target, cur_energy, self._ACTION_NAMES[action])
         return action
 
     # ------------------------------------------------------------------

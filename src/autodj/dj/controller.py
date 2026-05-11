@@ -265,7 +265,12 @@ class DjController:
 		logger.debug('FIRST SONG: {}'.format(current_song.title))
 		
 		cue_master_out, next_fade_type, max_fade_in_len, fade_out_len = tracklister.getMasterQueue(current_song, cue_master_in + fade_in_len, prev_fade_type)
-		next_song, cue_next_in, cue_master_out, fade_in_len, semitone_offset = self.tracklister.getBestNextSongAndCrossfade(current_song, cue_master_out, max_fade_in_len, fade_out_len, next_fade_type)		
+		try:
+			next_song, cue_next_in, cue_master_out, fade_in_len, semitone_offset = self.tracklister.getBestNextSongAndCrossfade(current_song, cue_master_out, max_fade_in_len, fade_out_len, next_fade_type)
+		except StopIteration as e:
+			logger.info(str(e))
+			isPlaying.value = False
+			return
 		song_titles_in_buffer.append(current_song.title)
 		add_song_to_tracklist(current_song, anchor_sample, next_song, next_fade_type, cue_master_out, fade_in_len, fade_out_len)
 		prev_in_or_out = 'in'
@@ -329,7 +334,12 @@ class DjController:
 			prev_fade_out_len = fade_out_len
 			
 			cue_master_out, next_fade_type, max_fade_in_len, fade_out_len = tracklister.getMasterQueue(current_song, cue_master_in + fade_in_len, prev_fade_type)
-			next_song, cue_next_in, cue_master_out, fade_in_len, semitone_offset = self.tracklister.getBestNextSongAndCrossfade(current_song, cue_master_out, max_fade_in_len, fade_out_len, next_fade_type)
+			try:
+				next_song, cue_next_in, cue_master_out, fade_in_len, semitone_offset = self.tracklister.getBestNextSongAndCrossfade(current_song, cue_master_out, max_fade_in_len, fade_out_len, next_fade_type)
+			except StopIteration as e:
+				logger.info(str(e))
+				isPlaying.value = False
+				break
 			anchor_sample = int(44100 * current_song.downbeats[cue_master_in])		
 			add_song_to_tracklist(current_song, anchor_sample, next_song, next_fade_type, cue_master_out, fade_in_len, fade_out_len)	
 			mix_buffer_cf_start_sample = int(f * (current_song.downbeats[cue_master_out] * 44100 - anchor_sample))

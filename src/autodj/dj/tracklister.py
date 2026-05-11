@@ -10,6 +10,7 @@ from .gto_mixer import GTOMixer
 import numpy as np
 from scipy.spatial.distance import euclidean as euclidean_distance
 import random
+import csv
 
 import logging
 logger = logging.getLogger('colorlogger')
@@ -287,6 +288,15 @@ class TrackLister:
 		self.prev_song_theme_descriptor = None
 
 		self.gto_mixer = None
+		self.recently_played_history = []  # persists across pool replenishments
+		self.GTO_RECENT_WINDOW = 3         # how many recent songs to block from re-selection
+
+		self.mix_log_path = './mix_log.csv'
+		self._mix_log_initialized = False
+		self._mix_log_step = 0
+
+		self.max_tracks = None   # None = unlimited; set before calling play
+		self._songs_played_count = 0
 
 	def getFirstSong(self):
 
@@ -319,8 +329,33 @@ class TrackLister:
 		self.chooseNewTheme(firstSong)
 		self.prev_song_theme_descriptor = firstSong.song_theme_descriptor
 
+		self._mix_log_initialized = False
+		self._mix_log_step = 0
+		self._songs_played_count = 1   # first song counts as track 1
+		self._log_song(firstSong, 'START')
+
 		return firstSong
 		
+	def _log_song(self, song, action_name):
+		"""Append one row to the mix log CSV (writes header on first call)."""
+		if self.gto_mixer is None:
+			return
+		energy  = self.gto_mixer.song_raw_features.get(song.title, [170.0, 0.0, 0.0])[1]
+		cluster = self.gto_mixer.get_cluster(song)
+		arc     = self.gto_mixer.energy_arc
+		step    = self._mix_log_step
+		planned = float(arc[min(step, len(arc) - 1)]) if len(arc) else 0.0
+		key, scale = self.gto_mixer.song_keys.get(song.title, ('', ''))
+		mode = 'w' if not self._mix_log_initialized else 'a'
+		with open(self.mix_log_path, mode, newline='') as f:
+			w = csv.writer(f)
+			if not self._mix_log_initialized:
+				w.writerow(['step', 'title', 'energy', 'cluster', 'action', 'key', 'scale', 'planned_energy'])
+				self._mix_log_initialized = True
+			w.writerow([step, song.title, round(energy, 3), cluster, action_name,
+			            key or '', scale or '', round(planned, 3)])
+		self._mix_log_step += 1
+
 	def chooseNewTheme(self, firstSong):
 		# Initialize the theme centroid
 		# 1. Measure the distance of each song to the first song
@@ -420,6 +455,9 @@ class TrackLister:
 		  4. Vocal-clash detection acts as a hard constraint; singing-safe options
 		     are always preferred over clashing ones.
 		'''
+		if self.max_tracks is not None and self._songs_played_count >= self.max_tracks:
+			raise StopIteration('Mix complete: {} songs played'.format(self._songs_played_count))
+
 		transition_length = master_fade_in_len + fade_out_len
 
 		# Open master song to access onset curve and singing voice data.
@@ -431,15 +469,26 @@ class TrackLister:
 		# ------------------------------------------------------------------
 		# Step 1 + 2: GTO candidate selection
 		# ------------------------------------------------------------------
+		gto_action_name = 'N/A'
 		if self.gto_mixer is not None and self.gto_mixer.fitted:
-			action       = self.gto_mixer.decide_action(master_song)
+			action = self.gto_mixer.decide_action(master_song)
+			gto_action_name = ['CALL', 'HOLD', 'RAISE'][action]
+
+			# Exclude the master song and recently played songs so the pool
+			# replenishment (which re-adds played songs) doesn't cause the
+			# system to immediately re-select a song it just played.
+			recent_titles = {s.title for s in self.recently_played_history[-self.GTO_RECENT_WINDOW:]}
+			recent_titles.add(master_song.title)
+			eligible = [s for s in self.songsUnplayed if s.title not in recent_titles]
+			if not eligible:
+				# All candidates were recently played; only exclude the master.
+				eligible = [s for s in self.songsUnplayed if s.title != master_song.title]
+
 			song_options = np.array(
-				self.gto_mixer.rank_candidates(
-					master_song, list(self.songsUnplayed), action
-				)
+				self.gto_mixer.rank_candidates(master_song, eligible, action)
 			)
 			if len(song_options) == 0:
-				song_options = np.array(self.songsUnplayed[:NUM_SONGS_ONSETS])
+				song_options = np.array(eligible[:NUM_SONGS_ONSETS])
 		else:
 			# Fallback: original key-filter + theme-distance selection.
 			song_options = self.getSongOptionsInKey(key, scale)
@@ -487,7 +536,8 @@ class TrackLister:
 					master_song.singing_voice[master_cue_corr:master_cue_corr + transition_len_corr] > 0)
 				singing_slave  = np.array(
 					s.singing_voice[queue_slave:queue_slave + transition_len_corr] > 0)
-				singing_clash  = is_vocal_clash_pred(singing_master, singing_slave)
+				min_len = min(len(singing_master), len(singing_slave))
+				singing_clash  = is_vocal_clash_pred(singing_master[:min_len], singing_slave[:min_len])
 
 				score = np.average(odf_scores)
 
@@ -528,6 +578,7 @@ class TrackLister:
 			self.semitone_offset = 0
 
 		self.prev_song_theme_descriptor = master_song.song_theme_descriptor
+		self.recently_played_history.append(master_song)
 		self.songsPlayed.append(best_song)
 		self.songsUnplayed.remove(best_song)
 		if len(self.songsUnplayed) <= NUM_SONGS_IN_KEY_MINIMUM:
@@ -538,5 +589,8 @@ class TrackLister:
 		# Advance GTO energy-arc position for the next transition.
 		if self.gto_mixer is not None:
 			self.gto_mixer.advance()
+
+		self._log_song(best_song, gto_action_name)
+		self._songs_played_count += 1
 
 		return best_song, best_slave_cue, best_master_cue, best_fade_in_len, self.semitone_offset
