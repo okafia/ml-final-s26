@@ -75,16 +75,26 @@ class GTOMixer:
 
     def _extract_raw(self, song):
         """
-        Return [tempo, -replaygain, theme_descriptor[0]] from an already-open song.
+        Return [tempo, h_ratio, theme_descriptor[0]] from an already-open song.
 
         Feature choices (all from existing annotations):
-          tempo          — BPM; captures rhythmic energy
-          -replaygain    — loudness proxy; louder tracks ↔ higher energy
+          tempo    — BPM; fine-grained beat matching within the 160-180 DnB range
+          h_ratio  — fraction of segments labelled 'H' (high-energy) by the
+                     structural segmentator; directly captures energy arc position
+                     and separates sub-genres far better than replaygain, which is
+                     a loudness normalisation target and clusters all DnB tracks
+                     together
           theme_descriptor[0] — first PCA component of spectral contrast;
-                                captures brightness / timbre
+                                 captures brightness / timbre (sub-genre proxy)
         """
-        tempo    = song.tempo    if song.tempo    is not None else 170.0
-        energy   = -song.replaygain if song.replaygain is not None else 0.0
+        tempo  = song.tempo if song.tempo is not None else 170.0
+        st     = getattr(song, 'segment_types', None)
+        if st and len(st) > 0:
+            energy = sum(1.0 for t in st if t == 'H') / len(st)
+        else:
+            # fallback: use replaygain if segment data unavailable
+            rg     = getattr(song, 'replaygain', None)
+            energy = (-rg / 20.0 + 0.5) if rg is not None else 0.5
         td       = getattr(song, 'song_theme_descriptor', None)
         spectral = float(np.array(td).flat[0]) if td is not None and len(td) > 0 else 0.0
         return [tempo, energy, spectral]
@@ -291,9 +301,28 @@ class GTOMixer:
         preferred, fallback = [], []
 
         if action == self.GTO_CALL:
-            # Sustain: prefer songs in the same energy cluster.
+            # Sustain: prefer songs in the same energy cluster, sorted by
+            # Camelot distance so harmonically compatible tracks come first.
+            ck_pair = self.song_keys.get(current_song.title)
+            ck = getattr(current_song, 'key', None) or (ck_pair[0] if ck_pair else None)
+            cs = getattr(current_song, 'scale', None) or (ck_pair[1] if ck_pair else None)
+
+            same_cluster = []
             for s in knn:
-                (preferred if self.get_cluster(s) == cur_cluster else fallback).append(s)
+                if self.get_cluster(s) == cur_cluster:
+                    same_cluster.append(s)
+                else:
+                    fallback.append(s)
+
+            if ck is not None:
+                def _camelot_key(s):
+                    sk_pair = self.song_keys.get(s.title)
+                    if sk_pair is None:
+                        return 7  # worst possible distance
+                    return camelot_distance(ck, cs, sk_pair[0], sk_pair[1])
+                same_cluster.sort(key=_camelot_key)
+
+            preferred = same_cluster
 
         elif action == self.GTO_HOLD:
             # Harmonic bridge: prefer songs within 1 Camelot step.

@@ -90,7 +90,7 @@ def main(log_path):
         ax.annotate(t, (x, y), textcoords='offset points',
                     xytext=(0, 9), fontsize=7, ha='center', rotation=35)
     ax.set_xlabel('Track number')
-    ax.set_ylabel('Energy  (−replaygain dB)')
+    ax.set_ylabel('Energy  (H-segment ratio)')
     ax.set_title('Energy Arc: Planned vs Actual')
     ax.set_xticks(steps)
     ax.grid(True, alpha=0.25)
