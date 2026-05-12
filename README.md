@@ -1,4 +1,4 @@
-# Drum and bass auto-DJ
+# GTO auto-DJ
 _Python3 version._
 
 This repository contains an adaptation of the automatic DJ system developed by Len Vande Veire, under the supervision of prof. Tijl De Bie. It has been updated to implement K nearest neighbors and K means clustering for adaptive track selection.
@@ -62,16 +62,6 @@ The following commands are available:
 * `stereo` : Toggle stereo audio support (enabled by default). Note: stereo audio is an experimental feature and leads to a longer processing time per crossfade.
 
 To exit the application, use the `Ctrl+C` key combination.
-
-## Changes in the Python3 version
-
-The Python3 version of the auto-DJ system features the same functionality as the original prototype.
-The main changes in the code base are:
-
-* Stereo audio support (experimental, enabled by default).
-* All annotations are saved in a single .json file per song.
-* Code refactoring: the annotation modules are now in a separate subpackage, and are incorporated into the auto-DJ application using wrapper classes.
-
 
 ## Copyright information
 
